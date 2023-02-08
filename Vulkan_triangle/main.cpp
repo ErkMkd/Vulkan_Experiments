@@ -94,11 +94,16 @@ private:
 	
 	vector<VkImage> swapChainImages;
 	vector<VkImageView> swapChainImageViews;
+	vector<VkFramebuffer> swapChainFramebuffers;
 	VkFormat swapChainImageFormat;
 	VkExtent2D swapChainExtent;
 
 	VkRenderPass renderPass;
 	VkPipelineLayout pipelineLayout;
+	VkPipeline graphicsPipeline;
+
+	VkCommandPool commandPool;
+	VkCommandBuffer commandBuffer;
 	
 	// Needed extensions
 	const vector<const char*> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
@@ -617,6 +622,7 @@ private:
 	void createGraphicsPipeline() {
 		auto vertShaderCode = readFile("shaders/vert.spv");
 		auto fragShaderCode = readFile("shaders/frag.spv");
+
 		VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
 		VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
 
@@ -628,11 +634,11 @@ private:
 		vertShaderStageInfo.pSpecializationInfo = nullptr; // Permet d'initialiser les constantes. Un même shader peut ainsi être paramétré de différentes manières.
 
 		VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
-		vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		vertShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-		vertShaderStageInfo.module = fragShaderModule;
-		vertShaderStageInfo.pName = "main";	
-		vertShaderStageInfo.pSpecializationInfo = nullptr;
+		fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+		fragShaderStageInfo.module = fragShaderModule;
+		fragShaderStageInfo.pName = "main";
+		fragShaderStageInfo.pSpecializationInfo = nullptr;
 
 		VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
@@ -668,11 +674,8 @@ private:
 		scissor.offset = { 0, 0 };
 		scissor.extent = swapChainExtent;
 
-		// Destroy the shader modules structures
-		vkDestroyShaderModule(logicalDevice, fragShaderModule, nullptr);
-		vkDestroyShaderModule(logicalDevice, vertShaderModule, nullptr);
 
-		// --- Dynamic states, inutilisé pour le moment:
+		// --- Dynamic states:
 
 		vector<VkDynamicState> dynamicStates = {
 			VK_DYNAMIC_STATE_VIEWPORT,
@@ -778,6 +781,34 @@ private:
 			throw runtime_error("ERROR - Failed to create pipeline layout !");
 		}
 
+		// --- Pipeline Info
+
+		VkGraphicsPipelineCreateInfo pipelineInfo{};
+		pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+		pipelineInfo.stageCount = 2;
+		pipelineInfo.pStages = shaderStages;
+		pipelineInfo.pVertexInputState = &vertexInputInfo;
+		pipelineInfo.pInputAssemblyState = &inputAssembly;
+		pipelineInfo.pViewportState = &viewportState;
+		pipelineInfo.pRasterizationState = &rasterizer;
+		pipelineInfo.pMultisampleState = &multisampling;
+		pipelineInfo.pDepthStencilState = nullptr;
+		pipelineInfo.pColorBlendState = &colorBlending;
+		pipelineInfo.pDynamicState = &dynamicStateInfo;
+		pipelineInfo.layout = pipelineLayout;
+		pipelineInfo.renderPass = renderPass;
+		pipelineInfo.subpass = 0;
+		pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+		pipelineInfo.basePipelineIndex = -1;
+
+		if (vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+			throw runtime_error("ERROR - Failed to create graphics pipeline !");
+		}
+
+		// Destroy the shader modules structures - Must be destroyed AFTER pipeline creation
+		vkDestroyShaderModule(logicalDevice, fragShaderModule, nullptr);
+		vkDestroyShaderModule(logicalDevice, vertShaderModule, nullptr);
+
 	}
 	/*
 		========================================= Render pass =========================================
@@ -815,6 +846,104 @@ private:
 		}
 	}
 
+	/*
+		========================================= Framebuffers =========================================
+	*/
+
+	void createFramebuffers() {
+		swapChainFramebuffers.resize(swapChainImageViews.size());
+		for (size_t i = 0; i < swapChainImageViews.size(); i++) {
+			VkImageView attachments[] = {swapChainImageViews[i]};
+
+			VkFramebufferCreateInfo framebufferInfo{};
+			framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+			framebufferInfo.renderPass = renderPass;
+			framebufferInfo.attachmentCount = 1;
+			framebufferInfo.pAttachments = attachments;
+			framebufferInfo.width = swapChainExtent.width;
+			framebufferInfo.height = swapChainExtent.height;
+			framebufferInfo.layers = 1;
+
+			if (vkCreateFramebuffer(logicalDevice, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS) {
+				throw runtime_error("ERROR - Failed to create framebuffer !");
+			}
+		}
+	}
+
+	/*
+		========================================= Command pool =========================================
+	*/
+
+	void createCommandPool() {
+		QueueFamilyIndices queueFamilyIndices = findQueueFamilies(physicalDevice);
+
+		VkCommandPoolCreateInfo poolInfo{};
+		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
+
+		if (vkCreateCommandPool(logicalDevice, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
+			throw runtime_error("ERROR - Failed to create command pool !");
+		}
+	}
+
+	/*
+		========================================= Command buffer =========================================
+	*/
+
+	void createCommandBuffer() {
+		VkCommandBufferAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.commandPool = commandPool;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandBufferCount = 1;
+		if (vkAllocateCommandBuffers(logicalDevice, &allocInfo, &commandBuffer) != VK_SUCCESS) {
+			throw runtime_error("ERROR - Failed to allocate command buffers !");
+		}
+	}
+
+	void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+		VkCommandBufferBeginInfo beginInfo{};
+		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		beginInfo.flags = 0;
+		beginInfo.pInheritanceInfo = nullptr;
+		if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+			throw runtime_error("ERROR - Failed to begin recording command buffer !");
+		}
+
+		VkRenderPassBeginInfo renderPassInfo{};
+		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO;
+		renderPassInfo.renderPass = renderPass;
+		renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
+		renderPassInfo.renderArea.offset = { 0, 0 };
+		renderPassInfo.renderArea.extent = swapChainExtent;
+		VkClearValue clearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
+		renderPassInfo.clearValueCount = 1;
+		renderPassInfo.pClearValues = &clearColor;
+		vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+		VkViewport viewport{};
+		viewport.x = 0.0f;
+		viewport.y = 0.0f;
+		viewport.width = static_cast<float>(swapChainExtent.width);
+		viewport.height = static_cast<float>(swapChainExtent.height);
+		viewport.minDepth = 0.0f;
+		viewport.maxDepth = 1.0f;
+		vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+		VkRect2D scissor{};
+		scissor.offset = { 0, 0 };
+		scissor.extent = swapChainExtent;
+		vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+		vkCmdEndRenderPass(commandBuffer);
+
+		if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+			throw runtime_error("ERROR - Failed to record command buffer !");
+		}
 
 	/*
 		========================================= Vulkan setup =========================================
@@ -830,6 +959,9 @@ private:
 		createImageViews();
 		createRenderPass();
 		createGraphicsPipeline();
+		createFramebuffers();
+		createCommandPool();
+		createCommandBuffer();
 	}
 
 	/*
@@ -838,6 +970,12 @@ private:
 
 	void cleanup() {
 		
+		vkDestroyCommandPool(logicalDevice, commandPool, nullptr);
+
+		for (auto framebuffer : swapChainFramebuffers) {
+			vkDestroyFramebuffer(logicalDevice, framebuffer, nullptr);
+		}
+		vkDestroyPipeline(logicalDevice, graphicsPipeline, nullptr);
 		vkDestroyPipelineLayout(logicalDevice, pipelineLayout, nullptr);
 		vkDestroyRenderPass(logicalDevice, renderPass, nullptr);
 
