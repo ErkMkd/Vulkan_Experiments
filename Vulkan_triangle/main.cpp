@@ -1,5 +1,6 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
 #include <iostream>
 #include <stdexcept>
 #include <cstdlib>
@@ -9,6 +10,7 @@
 #include <limits>
 #include <algorithm>
 #include <fstream>
+#include <array>
 
 using namespace std;
 
@@ -28,6 +30,47 @@ const std::vector<const char*> validationLayers = {
 
 // VERBOSE: True to display all debug messages. FALSE to display only warnings or errors messages.
 #define DEBUG_VERBOSE false
+
+/*
+=========================================
+	Geometries
+=========================================
+*/
+
+	struct Vertex {
+		glm::vec2 pos;
+		glm::vec3 color;
+
+		static VkVertexInputBindingDescription getBindingDescription() {
+			VkVertexInputBindingDescription bindingDescription{};
+			bindingDescription.binding = 0;
+			bindingDescription.stride = sizeof(Vertex);
+			bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+			return bindingDescription;
+		}
+		
+		static array<VkVertexInputAttributeDescription, 2> getAttributDescriptions() {
+			array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+			attributeDescriptions[0].binding = 0;
+			attributeDescriptions[0].location = 0;
+			attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT; // Memes descripteurs que pour les couleurs
+			attributeDescriptions[0].offset = offsetof(Vertex, pos);
+			attributeDescriptions[1].binding = 0;
+			attributeDescriptions[1].location = 1;
+			attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+			attributeDescriptions[1].offset = offsetof(Vertex, color);
+
+
+			return attributeDescriptions;
+		}
+		
+	};
+
+	const vector<Vertex> vertices = {
+		{{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+		{{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+		{{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+	};
 
 /*
 =========================================
@@ -113,6 +156,9 @@ private:
 	vector<VkFence> imagesInFlight;
 	size_t currentFrame = 0;
 	bool framebufferResized = false;
+
+	VkBuffer vertexBuffer;
+	VkDeviceMemory vertexBufferMemory;
 	
 	// Needed extensions
 	const vector<const char*> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
@@ -684,12 +730,15 @@ private:
 
 		// --- Vertex input
 
+		auto bindingDescription = Vertex::getBindingDescription();
+		auto attributeDescriptions = Vertex::getAttributDescriptions();
+
 		VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
 		vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-		vertexInputInfo.vertexBindingDescriptionCount = 0;
-		vertexInputInfo.pVertexBindingDescriptions = nullptr;
-		vertexInputInfo.vertexAttributeDescriptionCount = 0;
-		vertexInputInfo.pVertexAttributeDescriptions = nullptr;
+		vertexInputInfo.vertexBindingDescriptionCount = 1;
+		vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+		vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+		vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 		
 		// --- Input assembly
 
@@ -940,6 +989,54 @@ private:
 	}
 
 	/*
+		========================================= Memory  =========================================
+	*/
+
+	uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+		VkPhysicalDeviceMemoryProperties memProperties;
+		vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+		for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+			if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties ){
+				return i;
+			}
+		}
+		throw runtime_error("ERROR - Failed to find suitable memory type !");
+	}
+
+	/*
+		========================================= Vertex buffer =========================================
+	*/
+	void createVertexBuffer() {
+		VkBufferCreateInfo bufferInfo{};
+		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferInfo.size = sizeof(vertices[0]) * vertices.size();
+		bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		if (vkCreateBuffer(logicalDevice, &bufferInfo, nullptr, &vertexBuffer) != VK_SUCCESS) {
+			throw runtime_error("ERROR - Failed to create vertex buffer !");
+		}
+
+		VkMemoryRequirements memRequirements;
+		vkGetBufferMemoryRequirements(logicalDevice, vertexBuffer, &memRequirements);
+
+		VkMemoryAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocInfo.allocationSize = memRequirements.size;
+		allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+		if (vkAllocateMemory(logicalDevice, &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS) {
+			throw runtime_error("ERROR - Failed to allocate vertex buffer memory !");
+		}
+
+		vkBindBufferMemory(logicalDevice, vertexBuffer, vertexBufferMemory, 0);
+
+		void* data;
+		vkMapMemory(logicalDevice, vertexBufferMemory, 0, bufferInfo.size, 0, &data);
+		memcpy(data, vertices.data(), (size_t)bufferInfo.size);
+		vkUnmapMemory(logicalDevice, vertexBufferMemory);
+	}
+
+	/*
 		========================================= Command buffer =========================================
 	*/
 
@@ -976,24 +1073,30 @@ private:
 		VkClearValue clearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
 		renderPassInfo.clearValueCount = 1;
 		renderPassInfo.pClearValues = &clearColor;
+		
 		vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-		VkViewport viewport{};
-		viewport.x = 0.0f;
-		viewport.y = 0.0f;
-		viewport.width = static_cast<float>(swapChainExtent.width);
-		viewport.height = static_cast<float>(swapChainExtent.height);
-		viewport.minDepth = 0.0f;
-		viewport.maxDepth = 1.0f;
-		vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+		
+			VkViewport viewport{};
+			viewport.x = 0.0f;
+			viewport.y = 0.0f;
+			viewport.width = static_cast<float>(swapChainExtent.width);
+			viewport.height = static_cast<float>(swapChainExtent.height);
+			viewport.minDepth = 0.0f;
+			viewport.maxDepth = 1.0f;
+			vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-		VkRect2D scissor{};
-		scissor.offset = { 0, 0 };
-		scissor.extent = swapChainExtent;
-		vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+			VkRect2D scissor{};
+			scissor.offset = { 0, 0 };
+			scissor.extent = swapChainExtent;
+			vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+			VkBuffer vertexBuffers[] = { vertexBuffer };
+			VkDeviceSize offsets[] = { 0 };
+			vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
+			vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
 
 		vkCmdEndRenderPass(commandBuffer);
 
@@ -1045,6 +1148,7 @@ private:
 		createGraphicsPipeline();
 		createFramebuffers();
 		createCommandPool();
+		createVertexBuffer();
 		createCommandBuffer();
 		createSyncObjects();
 	}
@@ -1067,26 +1171,29 @@ private:
 		
 		cleanupSwapChain();
 
+		vkDestroyBuffer(logicalDevice, vertexBuffer, nullptr);
+		vkFreeMemory(logicalDevice, vertexBufferMemory, nullptr);
+
 		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 			vkDestroySemaphore(logicalDevice, imageAvailableSemaphores[i], nullptr);
 			vkDestroySemaphore(logicalDevice, renderFinishedSemaphores[i], nullptr);
 			vkDestroyFence(logicalDevice, inFlightFences[i], nullptr);
 		}
 
-vkDestroyCommandPool(logicalDevice, commandPool, nullptr);
+		vkDestroyCommandPool(logicalDevice, commandPool, nullptr);
 
-vkDestroyPipeline(logicalDevice, graphicsPipeline, nullptr);
-vkDestroyPipelineLayout(logicalDevice, pipelineLayout, nullptr);
-vkDestroyRenderPass(logicalDevice, renderPass, nullptr);
+		vkDestroyPipeline(logicalDevice, graphicsPipeline, nullptr);
+		vkDestroyPipelineLayout(logicalDevice, pipelineLayout, nullptr);
+		vkDestroyRenderPass(logicalDevice, renderPass, nullptr);
 
-vkDestroyDevice(logicalDevice, nullptr);
-if (enableValidationLayers) {
-	DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
-}
-vkDestroySurfaceKHR(instance, surface, nullptr); // Surface must be destroyed before the instance.
-vkDestroyInstance(instance, nullptr); // Vulkan resources should be destroyed before Instance.
-glfwDestroyWindow(window);
-glfwTerminate();
+		vkDestroyDevice(logicalDevice, nullptr);
+		if (enableValidationLayers) {
+			DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
+		}
+		vkDestroySurfaceKHR(instance, surface, nullptr); // Surface must be destroyed before the instance.
+		vkDestroyInstance(instance, nullptr); // Vulkan resources should be destroyed before Instance.
+		glfwDestroyWindow(window);
+		glfwTerminate();
 	}
 
 	/*
