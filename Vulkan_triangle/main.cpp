@@ -12,6 +12,8 @@
 #include <fstream>
 #include <array>
 
+#include "helpers.h"
+
 using namespace std;
 
 const uint32_t WIDTH = 800;
@@ -74,28 +76,6 @@ const std::vector<const char*> validationLayers = {
 
 /*
 =========================================
-	Helpers
-=========================================
-*/
-
-	vector<char> readFile(const std::string& filename) {
-		ifstream file(filename, ios::ate | ios::binary);
-
-		if (!file.is_open()) {
-			throw runtime_error("ERROR - Failed to open file !");
-		}
-
-		size_t fileSize = (size_t)file.tellg();
-		vector<char> buffer(fileSize);
-		file.seekg(0);
-		file.read(buffer.data(), fileSize);
-		file.close();
-		return buffer;
-	}
-
-
-/*
-=========================================
 	Main app
 =========================================
 */
@@ -111,6 +91,15 @@ public:
 	
 private:
 
+	GLFWwindow* window;
+	VkInstance instance;
+	VkDebugUtilsMessengerEXT debugMessenger;
+	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+	VkSurfaceKHR surface;
+
+	VkDevice logicalDevice;
+	
+	// Queue
 	struct QueueFamilyIndices {
 		optional<uint32_t> graphicsFamily;
 		optional<uint32_t> presentFamily;
@@ -118,37 +107,33 @@ private:
 			return graphicsFamily.has_value() && presentFamily.has_value();
 		}
 	};
-
+	VkQueue graphicsQueue;
+	VkQueue presentQueue;
+	
+	// SwapChain
 	//Swap chain device extension details
 	struct SwapChainSupportDetails {
 		VkSurfaceCapabilitiesKHR capabilities;
 		vector<VkSurfaceFormatKHR> formats;
 		vector<VkPresentModeKHR> presentModes;
 	};
-
-	GLFWwindow* window;
-	VkInstance instance;
-	VkDebugUtilsMessengerEXT debugMessenger;
-	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-	VkDevice logicalDevice;
-	VkQueue graphicsQueue;
-	VkQueue presentQueue;
-	VkSurfaceKHR surface;
 	VkSwapchainKHR swapChain;
-	
 	vector<VkImage> swapChainImages;
 	vector<VkImageView> swapChainImageViews;
 	vector<VkFramebuffer> swapChainFramebuffers;
 	VkFormat swapChainImageFormat;
 	VkExtent2D swapChainExtent;
 
+	//RenderPass
 	VkRenderPass renderPass;
 	VkPipelineLayout pipelineLayout;
 	VkPipeline graphicsPipeline;
 
+	//Commands
 	VkCommandPool commandPool;
 	vector<VkCommandBuffer> commandBuffers;
 
+	//Asynchrone datas
 	const int MAX_FRAMES_IN_FLIGHT = 2;
 	vector<VkSemaphore> imageAvailableSemaphores;
 	vector<VkSemaphore> renderFinishedSemaphores;
@@ -157,6 +142,7 @@ private:
 	size_t currentFrame = 0;
 	bool framebufferResized = false;
 
+	// Geometries
 	VkBuffer vertexBuffer;
 	VkDeviceMemory vertexBufferMemory;
 	
@@ -456,13 +442,17 @@ private:
 		}
 	}
 
+	// Si la fenêtre change de dimension, on recré les framebuffer et les views.
 	void recreateSwapChain() {
 		int width = 0, height = 0;
 		glfwGetFramebufferSize(window, &width, &height);
+		
+		// Cas spécial: si la fenêtre est en "minify"(width = height = 0), il ne se passe plus rien:
 		while (width == 0 || height == 0) {
 			glfwGetFramebufferSize(window, &width, &height);
 			glfwWaitEvents();
 		}
+
 		vkDeviceWaitIdle(logicalDevice);
 		cleanupSwapChain();
 		createSwapChain();
@@ -1006,35 +996,90 @@ private:
 	/*
 		========================================= Vertex buffer =========================================
 	*/
-	void createVertexBuffer() {
+
+	void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
 		VkBufferCreateInfo bufferInfo{};
 		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-		bufferInfo.size = sizeof(vertices[0]) * vertices.size();
-		bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+		bufferInfo.size = size;
+		bufferInfo.usage = usage;
 		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-		if (vkCreateBuffer(logicalDevice, &bufferInfo, nullptr, &vertexBuffer) != VK_SUCCESS) {
-			throw runtime_error("ERROR - Failed to create vertex buffer !");
+		
+		if (vkCreateBuffer(logicalDevice, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
+			throw runtime_error("ERROR - Failed to create buffer !");
 		}
-
+		
 		VkMemoryRequirements memRequirements;
-		vkGetBufferMemoryRequirements(logicalDevice, vertexBuffer, &memRequirements);
+		vkGetBufferMemoryRequirements(logicalDevice, buffer, &memRequirements);
 
 		VkMemoryAllocateInfo allocInfo{};
 		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
 		allocInfo.allocationSize = memRequirements.size;
-		allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+		allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
 
-		if (vkAllocateMemory(logicalDevice, &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS) {
-			throw runtime_error("ERROR - Failed to allocate vertex buffer memory !");
+		if (vkAllocateMemory(logicalDevice, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+			throw runtime_error("ERROR - Failed to allocate buffer memory !");
 		}
 
-		vkBindBufferMemory(logicalDevice, vertexBuffer, vertexBufferMemory, 0);
+		vkBindBufferMemory(logicalDevice, buffer, bufferMemory, 0);
+	}
+
+	void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+		VkCommandBufferAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandPool = commandPool;
+		allocInfo.commandBufferCount = 1;
+
+		VkCommandBuffer commandBuffer;
+		vkAllocateCommandBuffers(logicalDevice, &allocInfo, &commandBuffer);
+
+		VkCommandBufferBeginInfo beginInfo{};
+		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+		vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+		VkBufferCopy copyRegion{};
+		copyRegion.srcOffset = 0;
+		copyRegion.dstOffset = 0;
+		copyRegion.size = size;
+		vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+		vkEndCommandBuffer(commandBuffer);
+
+		VkSubmitInfo submitInfo{};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &commandBuffer;
+
+		vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+		vkQueueWaitIdle(graphicsQueue);
+
+		vkFreeCommandBuffers(logicalDevice, commandPool, 1, &commandBuffer);
+	}
+
+	void createVertexBuffer() {
+
+		VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+
+		VkBuffer stagingBuffer;
+		VkDeviceMemory stagingBufferMemory;
+		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
 
 		void* data;
-		vkMapMemory(logicalDevice, vertexBufferMemory, 0, bufferInfo.size, 0, &data);
-		memcpy(data, vertices.data(), (size_t)bufferInfo.size);
-		vkUnmapMemory(logicalDevice, vertexBufferMemory);
+		vkMapMemory(logicalDevice, stagingBufferMemory, 0, bufferSize, 0, &data);
+		memcpy(data, vertices.data(), (size_t)bufferSize);
+		vkUnmapMemory(logicalDevice, stagingBufferMemory);
+
+		createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory);
+
+		copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+
+		vkDestroyBuffer(logicalDevice, stagingBuffer, nullptr);
+		vkFreeMemory(logicalDevice, stagingBufferMemory, nullptr);
 	}
+
+	
 
 	/*
 		========================================= Command buffer =========================================
@@ -1206,6 +1251,7 @@ private:
 		// ------ Attend que le rendu soit terminé.
 		// La queue graphique activera le Fence à la fin du rendu.
 		// Pour le premier appel, nous avons activé le Fence à sa construction: VK_FENCE_CREATE_SIGNALED_BIT
+		// Le Fence sera désactivé plus bas, pour éviter les ruptures de processus asynchrone.
 		vkWaitForFences(logicalDevice, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
 		// ------ Acquisition de l'image dispo pour le rendu:
@@ -1256,6 +1302,7 @@ private:
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = signalSemaphores;
 
+		// Le Fence est désactivé juste avant la soumission de la nouvelle frame.
 		vkResetFences(logicalDevice, 1, &inFlightFences[currentFrame]);
 
 		if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
